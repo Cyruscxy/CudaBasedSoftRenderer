@@ -1,0 +1,10 @@
+Camera:
+Trans: 0.0/0.0/0.0 75.0/0.0/0.0 1.0/1,0/1.0
+
+Obj:
+Trans: 0.02/0.25/-0.15 90.0/0.0/0.0 1.0/1,0/1.0
+Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
+Texture: ../input/bunnystanford_res1_UVmapping3072_g005c.jpg
+Opacity: 0.6
+
+

@@ -19,5 +19,5 @@ Simple command line option are provided to the program.
 ```
 
 ## Output
-The output of the program will be store under ```output``` directory.
+The output of the program will be stored under ```output``` directory.
 ![output](output/out.png)

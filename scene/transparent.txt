@@ -4,35 +4,35 @@ Trans: 0.0/0.0/0.0 75.0/0.0/0.0 1.0/1,0/1.0
 Obj:
 Trans: 0.0/0.3/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4
 
 Obj:
 Trans: 0.0/0.4/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4
 
 Obj:
 Trans: 0.0/0.8/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4
 
 Obj:
 Trans: 0.0/0.6/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4
 
 Obj:
 Trans: 0.0/0.5/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4
 
 Obj:
 Trans: 0.0/0.7/-0.2 90.0/0.0/0.0 1.0/1,0/1.0
 Mesh: ../input/UVUnwrapped_Stanford_Bunny.obj
-Texture: ../input/bunnystanford_res1_UVmapping3072_TerraCotta_g001c.jpg
+Texture: ../input/grunge-dirty-paper-texture.jpg
 Opacity: 0.4

@@ -11,59 +11,9 @@
 #include "cuda_check.h"
 #include "pipeline_parameters.h"
 #include <cassert>
+#include "device_structs.h"
 
 namespace renderer {
-
-using geometry::Vector3;
-
-struct CuMemPatch {
-    unsigned char * mem;
-    uint32_t max_length;    // in bytes
-    uint32_t used;          // in bytes
-    uint32_t locked;
-};
-//===========================================
-namespace IntersectionListConstants{
-    constexpr uint32_t MAX_NODE_NUM = 128;
-    constexpr uint32_t NODE_SIZE = 1024;
-    constexpr uint32_t LOG2_NODE_SIZE = 10;
-};
-
-// list recording which triangles intersected with a tile
-struct IntersectionList {
-    uint32_t * buffer[IntersectionListConstants::MAX_NODE_NUM];
-    uint32_t n_nodes;
-    uint32_t cnt;
-    uint32_t locked;
-};
-//===========================================
-namespace FragmentBufferConstants {
-    constexpr uint32_t NODE_SIZE = 1024;
-    constexpr uint32_t LOG2_NODE_SIZE = 10;
-    constexpr uint32_t MAX_NODE_NUM = 16;
-}
-
-
-struct FragmentBuffer {
-    PerPixelLinkedListNode<FragmentAttribute> * buffer[FragmentBufferConstants::MAX_NODE_NUM];
-    uint32_t n_nodes;
-    uint32_t cnt;
-};
-//===========================================
-template <typename T>
-struct DynamicBuffer {
-    T *         buffer;
-    uint32_t    cnt;
-};
-//===========================================
-
-struct VisibleFaces {
-    uint32_t*   faces;
-    uint32_t    cnt;
-    uint32_t    lock;
-};
-
-//===========================================
 
 class Rasterizer {
 public:
@@ -71,13 +21,11 @@ public:
     Rasterizer(Rasterizer& other) = delete;
     Rasterizer(Rasterizer&& other) = delete;
     Rasterizer(const Rasterizer& other) = delete;
-    Rasterizer(const std::vector<std::string>& meshes, const std::vector<std::vector<Vector3>>& trans,
+    Rasterizer(const std::vector<std::string>& meshes, const std::vector<std::vector<geometry::Vector3>>& trans,
                const std::vector<std::string>& texture_files, const std::vector<float>& opacity, Camera view);
     ~Rasterizer();
 
     void run();
-    void debug();
-
 
     // pipeline rendering mode modification
     void setTransparent() { pipeline_flag |= 0x0001; }
@@ -90,9 +38,14 @@ public:
         ss_height = height * supersample_factor;
         ss_width = width * supersample_factor;
     }
+
+    static constexpr uint32_t AOIT_NODE_CNT = 8;
+    static constexpr uint32_t MEM_PATCH_SIZE_PIPELINE = 1 << 28;
+    static constexpr uint32_t MEM_PATCH_SIZE_SHADED_FRAGMENT = 1 << 29;
 private:
     void setup();
     void load(uint32_t index);
+    void setTransform(uint32_t obj_index);
 
     void clear();
     void clearDeviceObj(uint32_t obj_index);
@@ -106,6 +59,7 @@ private:
     void tile(uint32_t obj_index);
     void rasterize(uint32_t obj_index);
     void shadeFragments(uint32_t obj_index);
+    void computeAOITNodes();
     void alphaBlending();
     void writeBack();
 
@@ -132,14 +86,16 @@ private:
     float *                     depth_buffer;
     float4 *                    device_frame_buffer;
     float4 *                    device_resolved_buffer;
-    int32_t *                   per_pixel_start_offset;
+    int32_t *                   start_offset_obj;
+    int32_t *                   start_offset_all;
     FragmentBuffer *            fragment_buffer;
-    DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>> *
-                                shaded_fragment_buffer;
+    ShadedFragmentBuffer *      shaded_fragment_buffer;
     IntersectionList *          intersection_list;
     AOITNode *                  aoit_fragments;
-    CuMemPatch *                mem_patch;
-    unsigned char *             pre_allocated_mem;
+    CuMemPatch *                mem_patch_pipeline;
+    CuMemPatch *                mem_patch_shaded_frag;
+    unsigned char *             pre_allocated_mem_pipeline;
+    unsigned char *             pre_allocated_mem_shaded_frag;
 
     // pipeline obj
     Camera                      camera;
@@ -153,7 +109,6 @@ private:
     uint32_t    ss_height;
     uint32_t    supersample_factor;
 
-    static constexpr uint32_t AOIT_NODE_CNT = 8;
 };
 
 }

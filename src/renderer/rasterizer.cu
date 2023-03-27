@@ -11,13 +11,16 @@ Rasterizer::Rasterizer(const std::vector<std::string>& meshes, const std::vector
         , depth_buffer(nullptr)
         , device_frame_buffer(nullptr)
         , device_resolved_buffer(nullptr)
-        , per_pixel_start_offset(nullptr)
-        , mem_patch(nullptr)
-        , pre_allocated_mem(nullptr)
+        , start_offset_obj(nullptr)
+        , start_offset_all(nullptr)
+        , mem_patch_pipeline(nullptr)
+        , mem_patch_shaded_frag(nullptr)
+        , pre_allocated_mem_pipeline(nullptr)
+        , pre_allocated_mem_shaded_frag(nullptr)
 
         , fragment_buffer(nullptr)
-        , intersection_list(nullptr)
         , shaded_fragment_buffer(nullptr)
+        , intersection_list(nullptr)
         , aoit_fragments(nullptr)
 
         , width(1280)
@@ -71,8 +74,6 @@ void Rasterizer::run() {
     cudaEventRecord(start, 0);
     for ( uint32_t obj_index = 0; obj_index < n_objs; ++obj_index ) {
 
-        load(obj_index);
-
         // shade vertices
         shadeVertices(obj_index);
 
@@ -82,7 +83,7 @@ void Rasterizer::run() {
         // clip to screen transform
         clip2Screen(obj_index);
 
-        // cull back face
+        // cull back face or reorder the orders of back face vertices
         backFaceProcessing(obj_index);
 
         // get faces intersected with each tile
@@ -93,11 +94,12 @@ void Rasterizer::run() {
 
         // shade fragments
         shadeFragments(obj_index);
-
         // reset buffer
         resetPreAllocatedMem();
 
     }
+
+    computeAOITNodes();
 
     alphaBlending();
 
@@ -128,10 +130,14 @@ void Rasterizer::clear() {
     fragment_buffer = nullptr;
     CUDA_CHECK( cudaFree(shaded_fragment_buffer) );
     shaded_fragment_buffer = nullptr;
-    CUDA_CHECK( cudaFree(mem_patch) );
-    mem_patch = nullptr;
-    CUDA_CHECK( cudaFree(pre_allocated_mem) );
-    pre_allocated_mem = nullptr;
+    CUDA_CHECK( cudaFree(mem_patch_pipeline) );
+    mem_patch_pipeline = nullptr;
+    CUDA_CHECK( cudaFree(mem_patch_shaded_frag) );
+    mem_patch_shaded_frag = nullptr;
+    CUDA_CHECK( cudaFree(pre_allocated_mem_pipeline) );
+    pre_allocated_mem_pipeline = nullptr;
+    CUDA_CHECK( cudaFree(pre_allocated_mem_shaded_frag) );
+    pre_allocated_mem_shaded_frag = nullptr;
 
     CUDA_CHECK( cudaFree(depth_buffer) );
     depth_buffer = nullptr;
@@ -144,8 +150,10 @@ void Rasterizer::clear() {
 
     CUDA_CHECK( cudaFree(aoit_fragments) );
     aoit_fragments = nullptr;
-    CUDA_CHECK( cudaFree(per_pixel_start_offset) );
-    per_pixel_start_offset = nullptr;
+    CUDA_CHECK( cudaFree(start_offset_all) );
+    start_offset_all = nullptr;
+    CUDA_CHECK( cudaFree(start_offset_obj) );
+    start_offset_obj = nullptr;
 }
 
 void Rasterizer::setup() {
@@ -160,15 +168,19 @@ void Rasterizer::setup() {
     CUDA_CHECK( cudaMalloc(&aoit_fragments, sizeof(AOITNode) * (AOIT_NODE_CNT) * ss_width * ss_height) );
     CUDA_CHECK( cudaMalloc(&fragment_buffer, sizeof(FragmentBuffer) * n_tiles) );
     CUDA_CHECK( cudaMalloc(&intersection_list, sizeof(IntersectionList) * n_tiles) );
-    CUDA_CHECK( cudaMalloc(&per_pixel_start_offset, sizeof(int32_t) * ss_width * ss_height) );
-    CUDA_CHECK( cudaMalloc(&shaded_fragment_buffer, sizeof(DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>>) * n_tiles) );
-    CUDA_CHECK( cudaMalloc(&mem_patch, sizeof(CuMemPatch)) );
-    CUDA_CHECK( cudaMalloc(&pre_allocated_mem, sizeof(unsigned char) * (1U << 30) ) );
-    CUDA_CHECK( cudaMemset(pre_allocated_mem, 0, sizeof(unsigned char) * (1U << 30)) );
+    CUDA_CHECK( cudaMalloc(&start_offset_obj, sizeof(int32_t) * ss_width * ss_height) );
+    CUDA_CHECK( cudaMalloc(&start_offset_all, sizeof(int32_t) * ss_width * ss_height) );
+    CUDA_CHECK( cudaMalloc(&shaded_fragment_buffer, sizeof(ShadedFragmentBuffer) * n_tiles) );
+    CUDA_CHECK( cudaMalloc(&mem_patch_pipeline, sizeof(CuMemPatch)) );
+    CUDA_CHECK( cudaMalloc(&mem_patch_shaded_frag, sizeof(CuMemPatch)) );
+    CUDA_CHECK( cudaMalloc(&pre_allocated_mem_pipeline, sizeof(unsigned char) * MEM_PATCH_SIZE_PIPELINE) );
+    CUDA_CHECK( cudaMalloc(&pre_allocated_mem_shaded_frag, sizeof(unsigned char) * MEM_PATCH_SIZE_SHADED_FRAGMENT) );
+    CUDA_CHECK( cudaMemset(pre_allocated_mem_pipeline, 0, sizeof(unsigned char) * MEM_PATCH_SIZE_PIPELINE) );
+    CUDA_CHECK( cudaMemset(pre_allocated_mem_shaded_frag, 0, sizeof(unsigned char) * MEM_PATCH_SIZE_SHADED_FRAGMENT) );
     CUDA_CHECK( cudaMemset(device_frame_buffer, 0, sizeof(float4) * ss_width * ss_height) ) ;
     CUDA_CHECK( cudaMemset(fragment_buffer, 0, sizeof(FragmentBuffer) * n_tiles) ) ;
     CUDA_CHECK( cudaMemset(intersection_list, 0, sizeof(IntersectionList) * n_tiles) ) ;
-    CUDA_CHECK( cudaMemset(shaded_fragment_buffer, 0, sizeof(DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>>) * n_tiles) ) ;
+    CUDA_CHECK( cudaMemset(shaded_fragment_buffer, 0, sizeof(ShadedFragmentBuffer) * n_tiles) ) ;
 
     // set global parameters
     Parameters pipeline_params {};
@@ -194,7 +206,8 @@ void Rasterizer::setup() {
     CUDA_CHECK( cudaMemcpyToSymbol(clip_to_fb_scale, &clip_to_fb_scale_, sizeof(float3)) );
 
     dim3 grid_dim((ss_width + TILE_SIZE - 1) / TILE_SIZE, (ss_height + TILE_SIZE - 1) / TILE_SIZE );
-    setDeviceBuffer<AOIT_NODE_CNT><<<grid_dim, block_dim>>>(depth_buffer, per_pixel_start_offset, mem_patch, pre_allocated_mem, aoit_fragments, ss_width, ss_height);
+    setDeviceBuffer<AOIT_NODE_CNT><<<grid_dim, block_dim>>>(depth_buffer, start_offset_all, mem_patch_pipeline, mem_patch_shaded_frag, pre_allocated_mem_pipeline,
+                                                            pre_allocated_mem_shaded_frag, aoit_fragments, ss_width, ss_height);
     cudaDeviceSynchronize();
     cudaError error = cudaGetLastError();
     if ( error != cudaSuccess ) {
@@ -267,7 +280,7 @@ void Rasterizer::resetPreAllocatedMem() {
     uint32_t grid_dim_y = (ss_height + TILE_SIZE - 1) / TILE_SIZE;
     dim3 grid_dim(grid_dim_x, grid_dim_y);
 
-    resetDynamicMem<<<grid_dim, 1>>>(fragment_buffer, shaded_fragment_buffer, mem_patch);
+    resetDynamicMem<<<grid_dim, 1>>>(fragment_buffer, intersection_list, mem_patch_pipeline);
 
     cudaError error = cudaGetLastError();
     if ( error != cudaSuccess ) {
@@ -332,7 +345,7 @@ void Rasterizer::tile(uint32_t obj_index) {
     uint32_t grid_dim_x = (ss_width + TILE_SIZE - 1) / TILE_SIZE;
     uint32_t grid_dim_y = (ss_height + TILE_SIZE - 1) / TILE_SIZE;
     dim3 grid_dim(grid_dim_x, grid_dim_y);
-    tiling<<<grid_dim, block_dim>>>(shaded_vertices[obj_index], faces[obj_index], intersection_list, mem_patch,
+    tiling<<<grid_dim, block_dim>>>(shaded_vertices[obj_index], faces[obj_index], intersection_list, mem_patch_pipeline,
                                     visible_table[obj_index], n_faces[obj_index]);
     /*uint32_t n_grid = (n_faces[obj_index] + BLK_SIZE - 1) / BLK_SIZE;
     tiling_f<<<n_grid, block_dim>>>(shaded_vertices[obj_index], faces[obj_index], intersection_list, mem_patch,
@@ -354,12 +367,12 @@ void Rasterizer::rasterize(uint32_t obj_index) {
     if ( (pipeline_flag & PipelineFlags::Pipeline_DepthWriteDisableBit) | (pipeline_flag & PipelineFlags::Pipeline_Rendering_Transparent) ) {
         rasterizeWithEarlyZ<PipelineFlags::Pipeline_DepthWriteDisableBit><<<grid_dim, block_dim>>>(
                 shaded_vertices[obj_index], shaded_normal[obj_index], device_tex_coords[obj_index], depth_buffer, intersection_list,
-                faces[obj_index], fragment_buffer, per_pixel_start_offset, mem_patch, ss_width, ss_height, n_faces[obj_index]);
+                faces[obj_index], fragment_buffer, start_offset_obj, mem_patch_pipeline, ss_width, ss_height, n_faces[obj_index]);
     }
     else {
         rasterizeWithEarlyZ<0><<<grid_dim, block_dim>>>(
                 shaded_vertices[obj_index], shaded_normal[obj_index], device_tex_coords[obj_index], depth_buffer,intersection_list,
-                faces[obj_index], fragment_buffer, per_pixel_start_offset, mem_patch, ss_width, ss_height, n_faces[obj_index]);
+                faces[obj_index], fragment_buffer, start_offset_obj, mem_patch_pipeline, ss_width, ss_height, n_faces[obj_index]);
     }
     cudaDeviceSynchronize();
 
@@ -374,15 +387,14 @@ void Rasterizer::shadeFragments(uint32_t obj_index) {
     uint32_t grid_dim_y = (ss_height + TILE_SIZE - 1) / TILE_SIZE;
     dim3 grid_dim(grid_dim_x, grid_dim_y);
     if ( (pipeline_flag & PipelineMask_RenderingMode) == Pipeline_Rendering_Opaque ) {
-        fragmentShading<Pipeline_Rendering_Opaque><<<grid_dim, block_dim>>>(fragment_buffer, shaded_fragment_buffer,
-                                                                            mem_patch, textures[obj_index]->getTexObj(),
+        fragmentShading<Pipeline_Rendering_Opaque><<<grid_dim, block_dim>>>(fragment_buffer, shaded_fragment_buffer, mem_patch_shaded_frag,
+                                                                            textures[obj_index]->getTexObj(), start_offset_obj, start_offset_all,
                                                                             objs[obj_index].alpha, ss_width, ss_height);
     }
     else if ( (pipeline_flag & PipelineMask_RenderingMode) == Pipeline_Rendering_Transparent ) {
-        fragmentShading<Pipeline_Rendering_Transparent><<<grid_dim, block_dim>>>(fragment_buffer,
-                                                                                 shaded_fragment_buffer, mem_patch,
-                                                                                 textures[obj_index]->getTexObj(),
-                                                                                 objs[obj_index].alpha, ss_width,ss_height);
+        fragmentShading<Pipeline_Rendering_Transparent><<<grid_dim, block_dim>>>(fragment_buffer, shaded_fragment_buffer, mem_patch_shaded_frag,
+                                                                                 textures[obj_index]->getTexObj(), start_offset_obj, start_offset_all,
+                                                                                 objs[obj_index].alpha, ss_width, ss_height);
     }
     else {
         throw std::runtime_error("Wrong pipeline flags in rendering mode\n");
@@ -393,10 +405,17 @@ void Rasterizer::shadeFragments(uint32_t obj_index) {
         std::cerr << "Error: Failed to launch kernel fragmentShading with code " << error << std::endl;
     }
 
-    computeVisNode<AOIT_NODE_CNT><<<grid_dim, block_dim>>>(shaded_fragment_buffer, aoit_fragments, per_pixel_start_offset,
+
+}
+
+void Rasterizer::computeAOITNodes() {
+    uint32_t grid_dim_x = (ss_width + TILE_SIZE - 1) / TILE_SIZE;
+    uint32_t grid_dim_y = (ss_height + TILE_SIZE - 1) / TILE_SIZE;
+    dim3 grid_dim(grid_dim_x, grid_dim_y);
+    computeVisNode<AOIT_NODE_CNT><<<grid_dim, block_dim>>>(shaded_fragment_buffer, aoit_fragments, depth_buffer, start_offset_all,
                                                            ss_width, ss_height);
     cudaDeviceSynchronize();
-    error = cudaGetLastError();
+    cudaError error = cudaGetLastError();
     if ( error != cudaSuccess ) {
         std::cerr << "Error: Failed to launch kernel computeVisNode with code " << error << std::endl;
     }

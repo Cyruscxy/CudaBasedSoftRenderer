@@ -3,37 +3,60 @@
 #include <cuda_runtime.h>
 #include <assert.h>
 
-namespace renderer {
-__device__ __inline__ unsigned char*
-acquire(CuMemPatch * mem_patch, uint32_t size_in_byte) {
-    while ( atomicCAS(&(mem_patch->locked), 0, 1) != 0 ) { }
-    assert(size_in_byte < mem_patch->max_length - mem_patch->used);
-    unsigned char * patch = mem_patch->mem + mem_patch->used;
-    mem_patch->used += size_in_byte;
-
-    atomicExch(&(mem_patch->locked), 0);
-
-    return patch;
-}
-
-__device__ __inline__ uint32_t *
-at(IntersectionList* head, uint32_t index) {
-    assert(index < head->n_nodes * IntersectionListConstants::NODE_SIZE);
-    uint32_t node_index = index >> IntersectionListConstants::LOG2_NODE_SIZE;
-    uint32_t offset = index & (IntersectionListConstants::NODE_SIZE - 1);
-
-    return head->buffer[node_index] + offset;
-}
-
-__device__ __inline__ PerPixelLinkedListNode<FragmentAttribute> *
-at(FragmentBuffer* head, uint32_t index) {
-    assert(index < head->n_nodes * FragmentBufferConstants::NODE_SIZE);
-
-    uint32_t node_index = index >> FragmentBufferConstants::LOG2_NODE_SIZE;
-    uint32_t offset = index & (FragmentBufferConstants::NODE_SIZE - 1);
-
-    return head->buffer[node_index] + offset;
-}
-
+// struct used in kernel function
+struct CuMemPatch {
+    unsigned char * mem;
+    uint32_t max_length;    // in bytes
+    uint32_t used;          // in bytes
+    uint32_t locked;
 };
+//===========================================
+namespace IntersectionListConstants{
+    constexpr uint32_t MAX_NODE_NUM = 128;
+    constexpr uint32_t NODE_SIZE = 1024;
+    constexpr uint32_t LOG2_NODE_SIZE = 10;
+};
+
+// list recording which triangles intersected with a tile
+struct IntersectionList {
+    uint32_t * buffer[IntersectionListConstants::MAX_NODE_NUM];
+    uint32_t n_nodes;
+    uint32_t cnt;
+    uint32_t locked;
+};
+//===========================================
+namespace FragmentBufferConstants {
+    constexpr uint32_t NODE_SIZE = 1024;
+    constexpr uint32_t LOG2_NODE_SIZE = 10;
+    constexpr uint32_t MAX_NODE_NUM = 16;
+}
+
+struct FragmentBuffer {
+    PerPixelLinkedListNode<FragmentAttribute> * buffer[FragmentBufferConstants::MAX_NODE_NUM];
+    uint32_t n_nodes;
+    uint32_t cnt;
+};
+//===========================================
+namespace ShadedFragmentBufferConstants {
+    constexpr uint32_t NODE_SIZE = 1024;
+    constexpr uint32_t LOG2_NODE_SIZE = 10;
+    constexpr uint32_t MAX_NODE_NUM = 16;
+}
+
+struct ShadedFragmentBuffer {
+    PerPixelLinkedListNode<ShadedFragment> * buffer[ShadedFragmentBufferConstants::MAX_NODE_NUM];
+    uint32_t cnt;
+    uint32_t n_nodes;
+};
+//===========================================
+
+struct VisibleFaces {
+    uint32_t*   faces;
+    uint32_t    cnt;
+    uint32_t    lock;
+};
+
+//===========================================
+
+
 

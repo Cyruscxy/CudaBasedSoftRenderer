@@ -4,6 +4,7 @@
 #include "geometry_queries.h"
 #include "pipeline_parameters.h"
 #include "device_structs.h"
+#include "device_structs_manage.h"
 
 namespace renderer {
 
@@ -44,9 +45,11 @@ exclusiveScan ( uint32_t tid, T * data ) {
 template <uint32_t AOIT_NODE_CNT>
 __global__ void setDeviceBuffer(
         float*          depth_buffer,
-        int32_t *       per_pixel_start_offset,
-        CuMemPatch *    mem_patch,
-        unsigned char * pre_allocated_mem,
+        int32_t *       start_offset_all,
+        CuMemPatch *    mem_patch_pipeline,
+        CuMemPatch *    mem_patch_sf,
+        unsigned char * pre_allocated_mem_pipeline,
+        unsigned char * pre_allocated_mem_sf,
         AOITNode *      aoit_nodes,
         uint32_t        width,
         uint32_t        height
@@ -56,13 +59,20 @@ __global__ void setDeviceBuffer(
 
     if ( pixelX >= width || pixelY >= height ) return;
     depth_buffer[pixelX + width * pixelY] = 1.0f;
-    per_pixel_start_offset[pixelX + width * pixelY] = -1;
+    start_offset_all[pixelX + width * pixelY] = -1;
 
     if ( pixelX == 0 && pixelY == 0 ) {
-        mem_patch->mem = pre_allocated_mem;
-        mem_patch->used = 0;
-        mem_patch->max_length = 1U << 30;
-        mem_patch->locked = 0;
+        mem_patch_pipeline->mem = pre_allocated_mem_pipeline;
+        mem_patch_pipeline->used = 0;
+        mem_patch_pipeline->max_length = Rasterizer::MEM_PATCH_SIZE_PIPELINE;
+        mem_patch_pipeline->locked = 0;
+    }
+
+    if ( pixelX == 0 && pixelY == 0 ) {
+        mem_patch_sf->mem = pre_allocated_mem_sf;
+        mem_patch_sf->used = 0;
+        mem_patch_sf->max_length = Rasterizer::MEM_PATCH_SIZE_SHADED_FRAGMENT;
+        mem_patch_sf->locked = 0;
     }
 
     auto local_aoit_nodes = aoit_nodes + (pixelX + pixelY * width) * AOIT_NODE_CNT;
@@ -76,9 +86,8 @@ __global__ void setDeviceBuffer(
 
 __global__ void resetDynamicMem(
         FragmentBuffer *    fragment_buffer,
-        DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>> *
-                            shaded_fragment_buffer,
-        CuMemPatch*         mem_patch
+        IntersectionList *  intersection_list,
+        CuMemPatch*         mem_patch_pipeline
         ) {
     uint32_t bid_x = blockIdx.x;
     uint32_t bid_y = blockIdx.y;
@@ -90,13 +99,16 @@ __global__ void resetDynamicMem(
     local_fragment_buffer->n_nodes = 0;
     local_fragment_buffer->cnt = 0;
 
-    auto local_shaded_fragmen_buffer = shaded_fragment_buffer + bid_x + bid_y * gridDim.x;
-    local_shaded_fragmen_buffer->buffer = nullptr;
-    local_shaded_fragmen_buffer->cnt = 0;
+    auto local_intersection_list = intersection_list + bid_y * gridDim.x + bid_x;
+    for ( uint32_t i = 0; i < local_intersection_list->n_nodes; ++i ) {
+        local_intersection_list->buffer[i] = nullptr;
+    }
+    local_intersection_list->n_nodes = 0;
+    local_intersection_list->cnt = 0;
 
-    while ( atomicCAS(&mem_patch->locked, 0, 1) != 0 ) { }
-    mem_patch->used = 0;
-    atomicExch(&mem_patch->locked, 0);
+    while ( atomicCAS(&mem_patch_pipeline->locked, 0, 1) != 0 ) { }
+    mem_patch_pipeline->used = 0;
+    atomicExch(&mem_patch_pipeline->locked, 0);
 }
 
 __global__ void vertexShading (
@@ -228,12 +240,12 @@ __global__ void backFaceReordering(
     faces[tid_global].Normals.z =
             (faces[tid_global].Normals.z & ~face_backward) | (faces[tid_global].Normals.y & face_backward);
 
-    normals[faces[tid_global].Normals.x] =
+    /*normals[faces[tid_global].Normals.x] =
             face_backward == 0 ? normals[faces[tid_global].Normals.x] : -normals[faces[tid_global].Normals.x];
     normals[faces[tid_global].Normals.y] =
             face_backward == 0 ? normals[faces[tid_global].Normals.y] : -normals[faces[tid_global].Normals.y];
     normals[faces[tid_global].Normals.z] =
-            face_backward == 0 ? normals[faces[tid_global].Normals.z] : -normals[faces[tid_global].Normals.z];
+            face_backward == 0 ? normals[faces[tid_global].Normals.z] : -normals[faces[tid_global].Normals.z];*/
 }
 
 
@@ -344,7 +356,9 @@ __global__ void tiling(
     if ( tid_local == 0 ) local_intersection_list->cnt = faces_count;
 }
 
-__global__ void tiling_f(
+// Another Version with higher Computational Intensity, but is slower than the above version.
+// Thus, not used.
+/*__global__ void tiling_f(
         float4 *                shaded_vertices,
         TriangleFaceIndex *     faces,
         IntersectionList *      intersection_list,
@@ -452,7 +466,7 @@ __global__ void tiling_f(
         }
 
     }
-}
+}*/
 
 __device__ __inline__ float3
 barycentricCoord(float4 v0, float4 v1, float4 v2, float pixel_x, float pixel_y ) {
@@ -473,7 +487,7 @@ __global__ void rasterizeWithEarlyZ(
     IntersectionList *      intersection_list,
     TriangleFaceIndex *     faces,
     FragmentBuffer *        fragment_buffer,
-    int32_t *               per_pixel_start_offset,
+    int32_t *               start_offset_obj,
     CuMemPatch *            mem_patch,
     uint32_t                width,
     uint32_t                height,
@@ -497,7 +511,6 @@ __global__ void rasterizeWithEarlyZ(
     local_start_offset[tid_local] = -1;
     test_passed[tid_local] = 0;
     index[tid_local] = 0;
-
 
     auto local_intersection_list = intersection_list + bid;
     uint32_t n_intersected = local_intersection_list->cnt;
@@ -637,8 +650,8 @@ __global__ void rasterizeWithEarlyZ(
         if ( tid_local == 0 ) {
             if ( cnt > fragment_buffer[bid].n_nodes * FragmentBufferConstants::NODE_SIZE - fragment_buffer[bid].cnt ) {
                 assert(fragment_buffer[bid].n_nodes < FragmentBufferConstants::MAX_NODE_NUM);
-                fragment_buffer[bid].buffer[fragment_buffer[bid].n_nodes] =
-                        (PerPixelLinkedListNode<FragmentAttribute> *)acquire(mem_patch, sizeof(PerPixelLinkedListNode<FragmentAttribute>) * FragmentBufferConstants::NODE_SIZE);
+                fragment_buffer[bid].buffer[fragment_buffer[bid].n_nodes] = (PerPixelLinkedListNode<FragmentAttribute> *)
+                        acquire(mem_patch, sizeof(PerPixelLinkedListNode<FragmentAttribute>) * FragmentBufferConstants::NODE_SIZE);
                 fragment_buffer[bid].n_nodes += 1;
             }
         }
@@ -654,7 +667,7 @@ __global__ void rasterizeWithEarlyZ(
         fragment_cnt += cnt;
     }
 
-    per_pixel_start_offset[pixelY * width + pixelX] = local_start_offset[tid_local];
+    start_offset_obj[pixelY * width + pixelX] = local_start_offset[tid_local];
     if constexpr ( (flag & Pipeline_DepthWriteDisableBit) == 0 ) {
         depth_buffer[pixelY * width + pixelX] = local_depth_buffer[tid_local];
     }
@@ -664,10 +677,11 @@ __global__ void rasterizeWithEarlyZ(
 template < uint32_t flag >
 __global__ void fragmentShading(
     FragmentBuffer *            fragment_buffer,
-    DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>> *
-                                shaded_fragment_buffer,
+    ShadedFragmentBuffer *      shaded_fragment_buffer,
     CuMemPatch *                mem_patch,
     cudaTextureObject_t         texture,
+    int32_t *                   start_offset_obj,
+    int32_t *                   start_offset_all,
     float                       alpha,
     uint32_t                    width,
     uint32_t                    height
@@ -680,67 +694,108 @@ __global__ void fragmentShading(
 
     auto local_shaded_fragment_buffer = shaded_fragment_buffer + bid;
     auto local_fragment_buffer = fragment_buffer + bid;
-    uint32_t cnt = local_fragment_buffer->cnt;
+
+    __shared__ int32_t local_start_offset_sf[BLK_SIZE];
+    __shared__ int32_t local_start_offset_obj[BLK_SIZE];
+    __shared__ ShadedFragment local_shaded_fragment[BLK_SIZE];
+    __shared__ uint16_t shaded[BLK_SIZE];
+    __shared__ uint16_t index[BLK_SIZE];
+    local_start_offset_sf[tid_local] = start_offset_all[pixelX + pixelY * width];
+    local_start_offset_obj[tid_local] = start_offset_obj[pixelX + pixelY * width];
+
+    uint32_t frag_cnt = local_fragment_buffer->cnt;
     if ( tid_local == 0 ) {
-        local_shaded_fragment_buffer->buffer =
-                (PerPixelLinkedListNode<ShadedFragment> *) acquire(mem_patch, sizeof(PerPixelLinkedListNode<ShadedFragment>) * cnt);
-        local_shaded_fragment_buffer->cnt = cnt;
+        while ( frag_cnt + local_shaded_fragment_buffer->cnt >
+                local_shaded_fragment_buffer->n_nodes * ShadedFragmentBufferConstants::NODE_SIZE ) {
+            assert(local_shaded_fragment_buffer->n_nodes < ShadedFragmentBufferConstants::MAX_NODE_NUM - 1);
+            local_shaded_fragment_buffer->buffer[local_shaded_fragment_buffer->n_nodes] = (PerPixelLinkedListNode<ShadedFragment> *)
+                    acquire(mem_patch, sizeof(PerPixelLinkedListNode<ShadedFragment>) * ShadedFragmentBufferConstants::NODE_SIZE);
+            local_shaded_fragment_buffer->n_nodes += 1;
+        }
     }
     __syncthreads();
 
-    uint32_t loops = (cnt + BLK_SIZE - 1) / BLK_SIZE;
-    for ( uint32_t batch = 0; batch < loops; ++batch ) {
-        uint32_t frag_index = batch * BLK_SIZE + tid_local;
-        if ( frag_index >= cnt ) break;
+    uint32_t cnt = 0;
+    do {
+        if ( local_start_offset_obj[tid_local] != -1 ) {
+            auto frag_node = at(local_fragment_buffer, local_start_offset_obj[tid_local]);
+            auto fragment = &frag_node->data;
+            local_start_offset_obj[tid_local] = frag_node->last_offset;
 
-        auto node = at(local_fragment_buffer, frag_index);
-        auto local_fragment =  &node->data;
+            // compute mipmap level
+            float2 ddx, ddy;
+            ddx.x = fragment->DerivativesU.x * PipelineParams.width;
+            ddx.y = fragment->DerivativesV.x * PipelineParams.width;
+            ddy.x = fragment->DerivativesU.y * PipelineParams.height;
+            ddy.y = fragment->DerivativesV.y * PipelineParams.height;
+            float rho = max( dot(ddx, ddx), dot(ddy, ddy) );
+            float lod = 0.5f * log2(rho + 1e-10f);
 
+            // compute color
+            float3 normal = *(float3 *)(&fragment->Normal);
+            float normal_norm = normal.x * normal.x + normal.y * normal.y + normal.z * normal.z;
+            if ( normal_norm == 0 ) return;
+            float denom = rsqrt(normal_norm);
+            normal = normal * denom;
 
-        // compute mipmap level
-        float2 ddx, ddy;
-        ddx.x = local_fragment->DerivativesU.x * PipelineParams.width;
-        ddx.y = local_fragment->DerivativesV.x * PipelineParams.width;
-        ddy.x = local_fragment->DerivativesU.y * PipelineParams.height;
-        ddy.y = local_fragment->DerivativesV.y * PipelineParams.height;
-        float rho = max( dot(ddx, ddx), dot(ddy, ddy) );
-        float lod = 0.5f * log2(rho + 1e-10f);
+            // compute light
+            float sun_factor = max(dot(PipelineParams.sun_direction, normal), 0.0f);
+            float3 light = sun_factor * PipelineParams.sun_energy;
+            float sky_factor = 0.5f * dot(PipelineParams.sky_direction, normal) + 0.5f;
+            light = light + (PipelineParams.sky_energy - PipelineParams.ground_energy) * sky_factor + PipelineParams.ground_energy;
 
-        // compute color
-        float3 normal = *(float3 *)(&local_fragment->Normal);
-        float normal_norm = normal.x * normal.x + normal.y * normal.y + normal.z * normal.z;
-        if ( normal_norm == 0 ) return;
-        float denom = rsqrt(normal_norm);
-        normal = normal * denom;
+            // fetch color
+            float4 color = tex2DLod<float4>(texture, fragment->TexCoord.x, fragment->TexCoord.y, 0);
+            color.w = alpha;
 
-        float sun_factor = max(dot(PipelineParams.sun_direction, normal), 0.0f);
-        float3 light = sun_factor * PipelineParams.sun_energy;
-        float sky_factor = 0.5f * dot(PipelineParams.sky_direction, normal) + 0.5f;
-        light = light + (PipelineParams.sky_energy - PipelineParams.ground_energy) * sky_factor + PipelineParams.ground_energy;
+            if constexpr ((flag & PipelineMask_RenderingMode) == Pipeline_Rendering_Opaque) {
+                color.x *= light.x;
+                color.y *= light.y;
+                color.z *= light.z;
+                color.w = 0.0f;
+            }
+            else {
+                color.x *= light.x * color.w;
+                color.y *= light.y * color.w;
+                color.z *= light.z * color.w;
+                color.w = 1 - color.w;
+            }
 
-        float4 color = tex2DLod<float4>(texture, local_fragment->TexCoord.x, local_fragment->TexCoord.y, 0);
-        color.w = alpha;
-        //float4 color = make_float4(250.0f, 250.0f, 250.0f, 255.0f);
+            local_shaded_fragment[tid_local].Color = *(Vector4 *)(&color);
+            local_shaded_fragment[tid_local].Depth = fragment->Depth;
 
-        if constexpr ((flag & PipelineMask_RenderingMode) == Pipeline_Rendering_Opaque) {
-            color.x *= light.x;
-            color.y *= light.y;
-            color.z *= light.z;
-            color.w = 0.0f;
+            shaded[tid_local] = 1;
         }
         else {
-            color.x *= light.x * color.w;
-            color.y *= light.y * color.w;
-            color.z *= light.z * color.w;
-            color.w = 1 - color.w;
+            shaded[tid_local] = 0;
         }
-        local_shaded_fragment_buffer->buffer[frag_index].data.Color.x = color.x;
-        local_shaded_fragment_buffer->buffer[frag_index].data.Color.y = color.y;
-        local_shaded_fragment_buffer->buffer[frag_index].data.Color.z = color.z;
-        local_shaded_fragment_buffer->buffer[frag_index].data.Color.w = color.w;
-        local_shaded_fragment_buffer->buffer[frag_index].data.Depth = local_fragment->Depth;
-        local_shaded_fragment_buffer->buffer[frag_index].last_offset = node->last_offset;
-    }
+
+        index[tid_local] = shaded[tid_local];
+        __syncthreads();
+
+        // compute indices
+        exclusiveScan(tid_local, index);
+
+        cnt = index[BLK_SIZE - 1] + shaded[BLK_SIZE - 1];
+
+        // write to shaded fragment buffer
+        if ( shaded[tid_local] == 1 ) {
+            uint32_t current_index = local_shaded_fragment_buffer->cnt + index[tid_local];
+            auto sf_node = at(local_shaded_fragment_buffer, current_index);
+            sf_node->data = local_shaded_fragment[tid_local];
+            sf_node->last_offset = local_start_offset_sf[tid_local];
+            local_start_offset_sf[tid_local] = current_index;
+        }
+        __syncthreads();
+
+        if ( tid_local == 0 ) {
+            local_shaded_fragment_buffer->cnt += cnt;
+        }
+
+    } while ( cnt > 0 );
+
+    start_offset_all[pixelX + pixelY * width] = local_start_offset_sf[tid_local];
+
 }
 
 template<uint32_t AOIT_NODE_CNT>
@@ -790,12 +845,12 @@ insertFragment(
 // Intel's implementation: https://github.com/GameTechDev/AOIT-Update/blob/master/OIT_DX11/AOIT%20Technique/AOIT.hlsl
 template<uint32_t AOIT_NODE_CNT>
 __global__ void computeVisNode(
-        DynamicBuffer<PerPixelLinkedListNode<ShadedFragment>> *
-                        shaded_fragment_buffer,
-        AOITNode *      node_array,
-        const int32_t * per_pixel_start_offset,
-        uint32_t        width,
-        uint32_t        height
+        ShadedFragmentBuffer *  shaded_fragment_buffer,
+        AOITNode *              node_array,
+        float *                 depth_buffer,
+        const int32_t *         start_offset_all,
+        uint32_t                width,
+        uint32_t                height
         ) {
     uint32_t bid = blockIdx.x + blockIdx.y * gridDim.x;
     uint32_t tid_local = threadIdx.x + threadIdx.y * blockDim.x;
@@ -806,8 +861,10 @@ __global__ void computeVisNode(
     __shared__ float3 color[BLK_SIZE * (AOIT_NODE_CNT + 1)];
     __shared__ float depth[BLK_SIZE * (AOIT_NODE_CNT + 1)];
     __shared__ float trans[BLK_SIZE * (AOIT_NODE_CNT + 1)];
+    __shared__ float local_depth_buffer[BLK_SIZE];
+    local_depth_buffer[tid_local] = depth_buffer[pixelX + pixelY * width];
 
-    int32_t start_offset = per_pixel_start_offset[pixelY * width + pixelX];
+    int32_t start_offset = start_offset_all[pixelY * width + pixelX];
     auto local_node_array = node_array + (pixelY * width + pixelX) * AOIT_NODE_CNT;
     auto local_shaded_fragment_buffer = shaded_fragment_buffer + bid;
 
@@ -824,13 +881,17 @@ __global__ void computeVisNode(
     trans[tid_local * (AOIT_NODE_CNT + 1) + AOIT_NODE_CNT] = 1.0f;
 
     while ( start_offset != -1 ) {
-        auto shaded_frag = &(local_shaded_fragment_buffer->buffer[start_offset].data);
+        auto shaded_frag = at(local_shaded_fragment_buffer, start_offset);
+        start_offset = shaded_frag->last_offset;
+
+        // Late Z test
+        if ( shaded_frag->data.Depth > local_depth_buffer[tid_local] ) continue;
+
         insertFragment<AOIT_NODE_CNT>(
                 color + tid_local * (AOIT_NODE_CNT + 1),
                 depth + tid_local * (AOIT_NODE_CNT + 1),
                 trans + tid_local * (AOIT_NODE_CNT + 1),
-                shaded_frag);
-        start_offset = local_shaded_fragment_buffer->buffer[start_offset].last_offset;
+                &shaded_frag->data);
     }
 
     #pragma unroll AOIT_NODE_CNT

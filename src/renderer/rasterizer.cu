@@ -59,13 +59,21 @@ Rasterizer::~Rasterizer() {
 
 void Rasterizer::run() {
     setup();
-    for ( uint32_t index = 0; index < n_objs; ++ index) {
-        load(index);
-    }
-    float elapsed_time;
+
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    float elapsed_time;
+
+    cudaEventRecord(start, 0);
+    for ( uint32_t index = 0; index < n_objs; ++ index) {
+        load(index);
+    }
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
+    cudaEventElapsedTime(&elapsed_time, start, stop);
+
+    std::cout << "Load time: " << elapsed_time << " ms" << std::endl;
 
     uint32_t grid_dim_x = (ss_width + TILE_SIZE - 1) / TILE_SIZE;
     uint32_t grid_dim_y = (ss_height + TILE_SIZE - 1) / TILE_SIZE;
@@ -73,6 +81,7 @@ void Rasterizer::run() {
 
     cudaEventRecord(start, 0);
     for ( uint32_t obj_index = 0; obj_index < n_objs; ++obj_index ) {
+        setTransform(obj_index);
 
         // shade vertices
         shadeVertices(obj_index);
@@ -94,6 +103,7 @@ void Rasterizer::run() {
 
         // shade fragments
         shadeFragments(obj_index);
+
         // reset buffer
         resetPreAllocatedMem();
 
@@ -241,9 +251,13 @@ void Rasterizer::load(uint32_t index) {
     // set texture
     textures.push_back(std::make_unique<Texture>(obj.texture_file));
 
+}
+
+
+void Rasterizer::setTransform(uint32_t obj_index) {
     // set local-to-clip & normal-to-world transform matrix
     Mat4 world_to_clip = camera.projection() * camera.trans->world_to_local();
-    Mat4 local_to_clip = world_to_clip * obj.trans->local_to_world();
+    Mat4 local_to_clip = world_to_clip * objs[obj_index].trans->local_to_world();
     CUDA_CHECK( cudaMemcpyToSymbol(device_local_to_clip, &local_to_clip, sizeof(Mat4)) );
 
     auto normal_to_world = [](Mat4 const& l2w ) {
@@ -254,7 +268,7 @@ void Rasterizer::load(uint32_t index) {
                 Vector4 {      0.0f,      0.0f,      0.0f, 1.0f }
         }));
     };
-    Mat4 n2w = normal_to_world(obj.trans->local_to_world());
+    Mat4 n2w = normal_to_world(objs[obj_index].trans->local_to_world());
     CUDA_CHECK( cudaMemcpyToSymbol(device_normal_to_world, &n2w, sizeof(Mat4)) );
 }
 
@@ -414,6 +428,7 @@ void Rasterizer::computeAOITNodes() {
     dim3 grid_dim(grid_dim_x, grid_dim_y);
     computeVisNode<AOIT_NODE_CNT><<<grid_dim, block_dim>>>(shaded_fragment_buffer, aoit_fragments, depth_buffer, start_offset_all,
                                                            ss_width, ss_height);
+
     cudaDeviceSynchronize();
     cudaError error = cudaGetLastError();
     if ( error != cudaSuccess ) {
@@ -456,5 +471,6 @@ void Rasterizer::writeBack() {
         std::cerr << "Error: Failed to launch kernel writeFrame with code " << error << std::endl;
     }
 }
+
 
 }
